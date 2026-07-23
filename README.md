@@ -265,6 +265,7 @@ python3 scripts/train_frozen_qwen_vla.py \
   --epochs 25 \
   --batch-size 128 \
   --embedding-batch-size 8 \
+  --backbone-refresh-interval 2 \
   --device cuda \
   --dtype bfloat16 \
   --precompute-embeddings
@@ -318,9 +319,16 @@ outputs/qwen3b_frozen_policy/
   README.md
 ```
 
-Training and evaluation both resize camera frames to 224 x 224 before the Qwen
-processor. Lower `--embedding-batch-size` first if embedding precomputation
-runs out of VRAM; `--batch-size` affects only the small action head.
+Training and evaluation both resize camera frames to `--image-size` (224 x 224
+by default) before the Qwen processor. Lower `--embedding-batch-size` first if
+embedding precomputation runs out of VRAM; `--batch-size` affects only the small
+action head.
+
+At inference, `--backbone-refresh-interval 2` runs Qwen on every second policy
+step and reuses the cached visual-language embedding on the step in between.
+Proprioception and step/horizon features still update on every action. A new
+episode or changed instruction always forces a fresh Qwen embedding. Set the
+interval to `1` to restore per-step backbone inference.
 
 The default model and dataset revisions are pinned to the snapshots used when
 this trainer was added. Override `--model-revision` or `--dataset-revision`

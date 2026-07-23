@@ -15,6 +15,7 @@ from transformers import AutoTokenizer, Qwen2_5_VLForConditionalGeneration
 
 ACTION_DIM = 7
 DEFAULT_PROPRIO_DIM = 25
+DEFAULT_BACKBONE_REFRESH_INTERVAL = 2
 PARAMETER_LIMIT = 4_500_000_000
 PROMPT_VERSION = "frozen_qwen_vla_v1"
 
@@ -319,6 +320,14 @@ class FrozenQwenVLAPolicy(nn.Module):
         self.backbone_dtype = resolve_dtype(dtype, self.device)
         self.image_size = int(self.config["image_size"])
         self.proprio_dim = int(self.config["proprio_dim"])
+        self.backbone_refresh_interval = int(
+            self.config.get(
+                "backbone_refresh_interval",
+                DEFAULT_BACKBONE_REFRESH_INTERVAL,
+            )
+        )
+        if self.backbone_refresh_interval < 1:
+            raise ValueError("backbone_refresh_interval must be at least 1.")
 
         qwen_dir = root / "qwen"
         self.processor = load_qwen_processor(
@@ -355,6 +364,11 @@ class FrozenQwenVLAPolicy(nn.Module):
         self.register_buffer("auxiliary_mean", auxiliary_mean.to(self.device))
         self.register_buffer("auxiliary_std", auxiliary_std.to(self.device))
 
+        self._cached_embedding: torch.Tensor | None = None
+        self._cached_embedding_prompt: str | None = None
+        self._cached_embedding_step: int | None = None
+        self._last_observation_step: int | None = None
+
         parameter_count = sum(parameter.numel() for parameter in self.parameters())
         if parameter_count > PARAMETER_LIMIT:
             raise ValueError(
@@ -382,18 +396,51 @@ class FrozenQwenVLAPolicy(nn.Module):
             inputs["attention_mask"],
         ).float()
 
+    def _embedding_for_step(
+        self,
+        image_value: Any,
+        prompt: str,
+        step: int,
+    ) -> torch.Tensor:
+        episode_restarted = (
+            step == 0
+            or (
+                self._last_observation_step is not None
+                and step < self._last_observation_step
+            )
+        )
+        refresh_due = (
+            self._cached_embedding_step is None
+            or step - self._cached_embedding_step
+            >= self.backbone_refresh_interval
+        )
+        if (
+            self._cached_embedding is None
+            or self._cached_embedding_prompt != prompt
+            or episode_restarted
+            or refresh_due
+        ):
+            image = prepare_image(image_value, self.image_size)
+            self._cached_embedding = self._encode(image, prompt)
+            self._cached_embedding_prompt = prompt
+            self._cached_embedding_step = step
+
+        self._last_observation_step = step
+        assert self._cached_embedding is not None
+        return self._cached_embedding
+
     @torch.inference_mode()
     def act(self, obs: dict[str, Any]) -> np.ndarray:
-        image = prepare_image(obs["image"], self.image_size)
         instruction = str(obs.get("instruction", ""))
         task = str(obs.get("task", ""))
         difficulty = str(obs.get("difficulty", "") or "")
         prompt = self._cached_prompt(instruction, task, difficulty)
-        embedding = self._encode(image, prompt)
+        step = int(obs.get("step", 0))
+        embedding = self._embedding_for_step(obs["image"], prompt, step)
 
         auxiliary = auxiliary_vector(
             obs.get("proprio", np.zeros(self.proprio_dim, dtype=np.float32)),
-            obs.get("step", 0),
+            step,
             obs.get("horizon", 1),
             proprio_dim=self.proprio_dim,
         )

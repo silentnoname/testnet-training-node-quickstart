@@ -853,6 +853,7 @@ def export_policy(
         "prompt_version": PROMPT_VERSION,
         "pooling": "last_non_padding_token",
         "attn_implementation": args.attn_implementation,
+        "backbone_refresh_interval": args.backbone_refresh_interval,
         "auxiliary_features": [
             *[f"proprio_{index}" for index in range(args.proprio_dim)],
             "step_over_horizon",
@@ -923,6 +924,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--cache-shard-samples must be positive.")
     if args.step_stride <= 0:
         raise ValueError("--step-stride must be positive.")
+    if args.backbone_refresh_interval <= 0:
+        raise ValueError("--backbone-refresh-interval must be positive.")
     if not 0 <= args.val_fraction < 1:
         raise ValueError("--val-fraction must be in [0, 1).")
     if args.epochs <= 0:
@@ -970,6 +973,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--step-stride", type=int, default=1)
+    parser.add_argument(
+        "--backbone-refresh-interval",
+        type=int,
+        default=2,
+        help=(
+            "Run the frozen Qwen backbone every N policy steps and reuse its "
+            "embedding between refreshes."
+        ),
+    )
     parser.add_argument(
         "--max-samples",
         type=int,

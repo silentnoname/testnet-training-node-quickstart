@@ -50,8 +50,10 @@ class FakeMultimodalBase(nn.Module):
         super().__init__()
         self.visual = nn.Identity()
         self.projection = nn.Linear(1, hidden_size, bias=False)
+        self.forward_calls = 0
 
     def forward(self, input_ids, attention_mask, pixel_values, **kwargs):
+        self.forward_calls += 1
         del attention_mask, pixel_values, kwargs
         values = input_ids.float().unsqueeze(-1)
         return SimpleNamespace(last_hidden_state=self.projection(values))
@@ -224,6 +226,7 @@ class FrozenQwenUnitTests(unittest.TestCase):
                 "action_dim": 7,
                 "image_size": 224,
                 "attn_implementation": "sdpa",
+                "backbone_refresh_interval": 2,
                 "auxiliary_mean": [0.0] * 26,
                 "auxiliary_std": [1.0] * 26,
             }
@@ -237,6 +240,7 @@ class FrozenQwenUnitTests(unittest.TestCase):
                 root / "action_head.safetensors",
             )
 
+            fake_qwen = FakeQwen(hidden_size)
             with (
                 mock.patch(
                     "scripts.qwen_frozen_policy_adapter.load_qwen_processor",
@@ -245,7 +249,7 @@ class FrozenQwenUnitTests(unittest.TestCase):
                 mock.patch(
                     "scripts.qwen_frozen_policy_adapter."
                     "Qwen2_5_VLForConditionalGeneration.from_pretrained",
-                    return_value=FakeQwen(hidden_size),
+                    return_value=fake_qwen,
                 ),
             ):
                 policy = FrozenQwenVLAPolicy(
@@ -264,6 +268,48 @@ class FrozenQwenUnitTests(unittest.TestCase):
                         "horizon": 100,
                     }
                 )
+                policy.act(
+                    {
+                        "image": np.ones((96, 96, 3), dtype=np.uint8),
+                        "instruction": "lift the cube",
+                        "task": "lift_cube",
+                        "difficulty": "low",
+                        "proprio": np.ones(25, dtype=np.float32),
+                        "step": 11,
+                        "horizon": 100,
+                    }
+                )
+                policy.act(
+                    {
+                        "image": np.ones((96, 96, 3), dtype=np.uint8),
+                        "instruction": "lift the cube",
+                        "task": "lift_cube",
+                        "difficulty": "low",
+                        "proprio": np.ones(25, dtype=np.float32),
+                        "step": 12,
+                        "horizon": 100,
+                    }
+                )
+                self.assertEqual(fake_qwen.model.forward_calls, 2)
+
+                policy.act(
+                    {
+                        "image": np.ones((96, 96, 3), dtype=np.uint8),
+                        "instruction": "lift the cube",
+                        "task": "lift_cube",
+                        "difficulty": "low",
+                        "proprio": np.ones(25, dtype=np.float32),
+                        "step": 0,
+                        "horizon": 100,
+                    }
+                )
+                self.assertEqual(fake_qwen.model.forward_calls, 3)
+                policy._embedding_for_step(
+                    np.ones((96, 96, 3), dtype=np.uint8),
+                    "changed prompt",
+                    step=1,
+                )
+                self.assertEqual(fake_qwen.model.forward_calls, 4)
             self.assertEqual(action.shape, (7,))
             self.assertEqual(action.dtype, np.float32)
             self.assertTrue(np.isfinite(action).all())
@@ -349,6 +395,7 @@ class FrozenQwenUnitTests(unittest.TestCase):
             self.assertTrue((output / "qwen" / "model.safetensors").is_file())
             policy_config = json.loads((output / "policy_config.json").read_text())
             self.assertEqual(policy_config["hidden_size"], 8)
+            self.assertEqual(policy_config["backbone_refresh_interval"], 2)
 
 
 if __name__ == "__main__":
