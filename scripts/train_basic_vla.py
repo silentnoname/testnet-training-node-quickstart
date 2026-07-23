@@ -27,6 +27,19 @@ PROPRIO_DIM = 32
 ACTION_DIM = 7
 
 DEFAULT_HF_DATASET = "random-sequence/flock-robotics-vla-training-v2"
+EPISODE_COLUMN_CANDIDATES = (
+    "episode_id",
+    "episode_index",
+    "trajectory_id",
+    "trajectory_index",
+)
+STEP_COLUMN_CANDIDATES = ("step", "step_index", "frame_index", "timestep")
+HORIZON_COLUMN_CANDIDATES = (
+    "horizon",
+    "episode_horizon",
+    "episode_length",
+    "trajectory_length",
+)
 
 
 ADAPTER_SOURCE = r"""
@@ -219,6 +232,79 @@ class LoadedSamples:
     manifest_summary: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class HFDatasetIndex:
+    episode_column: str | None
+    step_column: str | None
+    episode_ids: list[str]
+    steps: list[int]
+    episode_rows: dict[str, list[int]]
+    episode_horizons: dict[str, int]
+
+
+def first_available_column(
+    column_names: set[str],
+    candidates: tuple[str, ...],
+) -> str | None:
+    return next((name for name in candidates if name in column_names), None)
+
+
+def index_hf_dataset(dataset: Any) -> HFDatasetIndex:
+    column_names = set(dataset.column_names)
+    episode_column = first_available_column(
+        column_names,
+        EPISODE_COLUMN_CANDIDATES,
+    )
+    step_column = first_available_column(column_names, STEP_COLUMN_CANDIDATES)
+
+    row_count = len(dataset)
+    if episode_column is not None:
+        episode_ids = [str(value) for value in dataset[episode_column]]
+    else:
+        done_values = (
+            [bool(value) for value in dataset["done"]]
+            if "done" in column_names
+            else [False] * row_count
+        )
+        episode_ids = []
+        episode_index = 0
+        for done in done_values:
+            episode_ids.append(str(episode_index))
+            if done:
+                episode_index += 1
+
+    if step_column is not None:
+        steps = [int(value) for value in dataset[step_column]]
+    else:
+        next_step: dict[str, int] = defaultdict(int)
+        steps = []
+        for episode_id in episode_ids:
+            steps.append(next_step[episode_id])
+            next_step[episode_id] += 1
+
+    episode_rows: dict[str, list[int]] = defaultdict(list)
+    for row_index, episode_id in enumerate(episode_ids):
+        episode_rows[episode_id].append(row_index)
+    for row_indices in episode_rows.values():
+        row_indices.sort(key=steps.__getitem__)
+
+    episode_horizons = {
+        episode_id: max(
+            len(row_indices),
+            max((steps[index] for index in row_indices), default=-1) + 1,
+        )
+        for episode_id, row_indices in episode_rows.items()
+    }
+    return HFDatasetIndex(
+        episode_column=episode_column,
+        step_column=step_column,
+        episode_ids=episode_ids,
+        steps=steps,
+        episode_rows=dict(episode_rows),
+        episode_horizons=episode_horizons,
+    )
+
+
 def zip_member_by_suffix(zf: zipfile.ZipFile, suffix: str) -> str:
     suffix = suffix.lstrip("/")
     for name in zf.namelist():
@@ -268,8 +354,9 @@ def load_samples_from_hf(
 ) -> LoadedSamples:
     """Load training samples from a HuggingFace Parquet dataset.
 
-    Each row is one timestep.  Rows are grouped by episode_id and
-    step_stride is applied within each episode before shuffling.
+    Each row is one timestep. Rows are grouped by the available episode column
+    (for example episode_id or episode_index), and step_stride is applied
+    within each episode before shuffling.
     """
     try:
         from datasets import load_dataset as hf_load_dataset
@@ -280,15 +367,11 @@ def load_samples_from_hf(
 
     print(f"Loading training data from HuggingFace: {dataset_id}", flush=True)
     ds = hf_load_dataset(dataset_id, split=split)
+    dataset_index = index_hf_dataset(ds)
 
     rng = random.Random(seed)
-    episode_row_indices: dict[str, list[int]] = defaultdict(list)
-    for i in range(len(ds)):
-        ep_id = str(ds[i]["episode_id"])
-        episode_row_indices[ep_id].append(i)
-
     selected: list[int] = []
-    for row_ids in episode_row_indices.values():
+    for row_ids in dataset_index.episode_rows.values():
         selected.extend(row_ids[:: max(1, step_stride)])
 
     rng.shuffle(selected)
@@ -303,7 +386,11 @@ def load_samples_from_hf(
     difficulties: set[str] = set()
 
     subset = ds.select(selected)
-    for row in tqdm(subset, desc="Loading from HF dataset", total=len(selected)):
+    for subset_index, row in enumerate(
+        tqdm(subset, desc="Loading from HF dataset", total=len(selected))
+    ):
+        original_index = selected[subset_index]
+        episode_id = dataset_index.episode_ids[original_index]
         img = row["image"]
         if hasattr(img, "convert"):
             img_arr = np.array(img.convert("RGB"), dtype=np.uint8)
@@ -313,8 +400,16 @@ def load_samples_from_hf(
         task_name = str(row.get("task", ""))
         difficulty_val = str(row.get("difficulty", "") or "")
         instruction = str(row.get("instruction", ""))
-        step = int(row.get("step", 0))
-        horizon = int(row.get("horizon", 200) or 200)
+        step = dataset_index.steps[original_index]
+        horizon_value = next(
+            (
+                row.get(column)
+                for column in HORIZON_COLUMN_CANDIDATES
+                if row.get(column) is not None
+            ),
+            dataset_index.episode_horizons[episode_id],
+        )
+        horizon = int(horizon_value or dataset_index.episode_horizons[episode_id])
 
         text = f"task {task_name} difficulty {difficulty_val} instruction {instruction}"
         text_feat = text_vector(text, dim=text_dim)
@@ -332,9 +427,11 @@ def load_samples_from_hf(
         raise ValueError("No training samples were loaded from the HF dataset.")
 
     manifest_summary = {
-        "trajectory_count": len(episode_row_indices),
+        "trajectory_count": len(dataset_index.episode_rows),
         "loaded_frame_count": len(actions),
         "step_stride": step_stride,
+        "episode_column": dataset_index.episode_column or "derived_from_done",
+        "step_column": dataset_index.step_column or "derived_within_episode",
         "tasks": sorted(tasks),
         "difficulties": sorted(d for d in difficulties if d),
         "source": f"hf:{dataset_id}",

@@ -61,8 +61,21 @@ DEFAULT_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 DEFAULT_MODEL_REVISION = "66285546d2b821cf421d4f5eb2576359d3770cd3"
 DEFAULT_DATASET = "random-sequence/flock-robotics-vla-training-v2"
 DEFAULT_DATASET_REVISION = "a90a4a6062e8a43a229408608a68344f04d24e9f"
-CACHE_SCHEMA = "frozen_qwen_embedding_cache_v1"
+CACHE_SCHEMA = "frozen_qwen_embedding_cache_v2"
 POLICY_SCHEMA = "frozen_qwen_robotics_policy_v1"
+EPISODE_FIELD_CANDIDATES = (
+    "episode_id",
+    "episode_index",
+    "trajectory_id",
+    "trajectory_index",
+)
+STEP_FIELD_CANDIDATES = ("step", "step_index", "frame_index", "timestep")
+HORIZON_FIELD_CANDIDATES = (
+    "horizon",
+    "episode_horizon",
+    "episode_length",
+    "trajectory_length",
+)
 BACKBONE_FILE_PATTERNS = (
     "*.json",
     "*.jinja",
@@ -109,6 +122,31 @@ def stable_episode_hash(episode_id: str) -> int:
         episode_id.encode("utf-8"), digest_size=8, person=b"flock-vla"
     ).digest()
     return int.from_bytes(digest, "little") & ((1 << 63) - 1)
+
+
+def first_row_value(
+    row: dict[str, Any],
+    candidates: tuple[str, ...],
+    default: Any,
+) -> Any:
+    for name in candidates:
+        value = row.get(name)
+        if value is not None:
+            return value
+    return default
+
+
+def row_episode_id(row: dict[str, Any], fallback: str = "unknown") -> str:
+    return str(first_row_value(row, EPISODE_FIELD_CANDIDATES, fallback))
+
+
+def row_step(row: dict[str, Any], fallback: int = 0) -> int:
+    return int(first_row_value(row, STEP_FIELD_CANDIDATES, fallback))
+
+
+def row_horizon(row: dict[str, Any], fallback: int = 200) -> int:
+    value = int(first_row_value(row, HORIZON_FIELD_CANDIDATES, fallback) or fallback)
+    return max(value, 1)
 
 
 def cache_spec(args: argparse.Namespace) -> dict[str, Any]:
@@ -187,7 +225,7 @@ def iter_dataset_rows(args: argparse.Namespace) -> Iterator[dict[str, Any]]:
     )
     selected = 0
     for row_index, row in enumerate(dataset):
-        step = int(row.get("step", row_index))
+        step = row_step(row, row_index)
         if step % args.step_stride:
             continue
         yield row
@@ -399,8 +437,8 @@ def encode_batch(
         auxiliary.append(
             auxiliary_vector(
                 row["proprio"],
-                row.get("step", 0),
-                row.get("horizon", 1),
+                row_step(row),
+                row_horizon(row),
                 proprio_dim=args.proprio_dim,
             )
         )
@@ -411,9 +449,7 @@ def encode_batch(
             )
         action = np.nan_to_num(action, nan=0.0, posinf=1.0, neginf=-1.0)
         actions.append(np.clip(action, -1.0, 1.0))
-        episode_hashes.append(
-            stable_episode_hash(str(row.get("episode_id", "unknown")))
-        )
+        episode_hashes.append(stable_episode_hash(row_episode_id(row)))
 
     return {
         "embeddings": embeddings.detach().float().cpu().to(torch.float16).contiguous(),

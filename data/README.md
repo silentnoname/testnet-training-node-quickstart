@@ -20,13 +20,11 @@ python3 scripts/train_basic_vla.py --out outputs/basic_vla_policy
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `episode_id` | string | Unique trajectory identifier |
+| `episode_index` | int | Unique trajectory identifier |
+| `step_index` | int | Timestep index within the trajectory |
 | `task` | string | Task name (e.g. `lift_cube`, `pick_place_can`) |
 | `instruction` | string | Natural-language instruction for this episode |
 | `difficulty` | string | `low`, `medium`, `hard`, or `very_high` |
-| `seed` | int | Environment seed used during recording |
-| `step` | int | Timestep index within the episode |
-| `horizon` | int | Total episode length in steps |
 | `image` | PIL Image | RGB observation frame, 96×96 pixels |
 | `proprio` | float32[25] | Joint positions/velocities, end-effector pose, gripper state |
 | `action` | float32[7] | Demonstrated action clipped to `[-1, 1]` |

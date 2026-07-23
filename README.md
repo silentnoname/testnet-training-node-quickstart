@@ -60,18 +60,21 @@ All demonstrations end with task success. Every row in the Parquet dataset is on
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `episode_id` | string | Unique trajectory identifier |
+| `episode_index` | int | Unique trajectory identifier |
+| `step_index` | int | Timestep index within the trajectory |
 | `task` | string | Task name (e.g. `lift_cube`, `pick_place_can`) |
 | `instruction` | string | Natural-language instruction |
 | `difficulty` | string | `low`, `medium`, `hard`, or `very_high` |
-| `seed` | int | Environment seed used during recording |
-| `step` | int | Timestep index within the episode |
-| `horizon` | int | Total episode length in steps |
 | `image` | PIL Image | RGB camera frame, 96 × 96 pixels |
 | `proprio` | float32[25] | Joint pos/vel, end-effector pose, gripper state |
 | `action` | float32[7] | Demonstrated action clipped to `[-1, 1]` |
 | `reward` | float32 | Shaped task reward at this step |
 | `done` | bool | Episode termination flag |
+
+The loaders also accept the older `episode_id` / `step` field names. When the
+HF rows do not include `horizon`, the basic trainer derives it from each
+episode's maximum step, while the streaming Qwen trainer uses the validator's
+default horizon of 200.
 
 Task families covered:
 
