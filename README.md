@@ -251,6 +251,84 @@ outputs/basic_vla_policy/
 
 ---
 
+## Frozen Qwen2.5-VL Policy
+
+For a stronger multimodal policy that still fits the 4.5 B parameter cap, the
+repository includes a trainer for a completely frozen
+`Qwen/Qwen2.5-VL-3B-Instruct` backbone and a small trainable action head.
+
+```bash
+python3 scripts/train_frozen_qwen_vla.py \
+  --model Qwen/Qwen2.5-VL-3B-Instruct \
+  --dataset random-sequence/flock-robotics-vla-training-v2 \
+  --out outputs/qwen3b_frozen_policy \
+  --epochs 25 \
+  --batch-size 128 \
+  --embedding-batch-size 8 \
+  --device cuda \
+  --dtype bfloat16 \
+  --precompute-embeddings
+```
+
+The expensive pass is performed once:
+
+```text
+image + instruction + task
+  -> frozen Qwen2.5-VL
+  -> 2048D last-token representation
+
+2048D representation + proprio[25] + step/horizon
+  -> Linear(2074, 512)
+  -> SiLU
+  -> Linear(512, 256)
+  -> SiLU
+  -> Linear(256, 7)
+  -> Tanh
+```
+
+Only the roughly 1.2 M parameter action head receives gradients. The trainer
+uses a deterministic episode-level train/validation split so frames from the
+same demonstration cannot leak into both sets. It also fits auxiliary-feature
+normalization on the training episodes only. At float16, the full 25,328-row
+embedding cache is roughly 105 MB; the float32 action-head weights are roughly
+4.8 MB.
+
+By default, embeddings are stored in the sibling directory
+`outputs/qwen3b_frozen_policy_embedding_cache`, not inside the submission.
+This is important: validators may count every tensor in the submitted folder
+as model parameters. Re-running the same command reuses a compatible cache.
+Use `--force-recompute` together with `--precompute-embeddings` to replace it.
+
+The exported folder is self-contained and does not download a base model at
+validation time:
+
+```text
+outputs/qwen3b_frozen_policy/
+  flock_robotics_adapter.py
+  qwen/
+    config.json
+    model-*.safetensors
+    model.safetensors.index.json
+    preprocessor_config.json
+    tokenizer files
+  action_head.safetensors
+  policy_config.json
+  training_report.json
+  requirements.txt
+  README.md
+```
+
+Training and evaluation both resize camera frames to 224 x 224 before the Qwen
+processor. Lower `--embedding-batch-size` first if embedding precomputation
+runs out of VRAM; `--batch-size` affects only the small action head.
+
+The default model and dataset revisions are pinned to the snapshots used when
+this trainer was added. Override `--model-revision` or `--dataset-revision`
+deliberately when refreshing either source. Both revisions are recorded in the
+cache and policy metadata.
+
+---
+
 ## Better Training Methods
 
 The CNN baseline is only the lowest-friction path. Strong submissions should use one of the approaches below.
@@ -276,7 +354,8 @@ Practical notes:
 - Keep LoRA rank modest at first (r=8 or r=16).
 - Train the action head at a higher learning rate than the LoRA-modified backbone.
 - Save every learned component used by `flock_robotics_adapter.py`.
-- Reference model: Qwen2.5-VL-3B + 1.2 B action head ≈ 4.06 B params total.
+- A frozen Qwen2.5-VL-3B plus the included 1.2 M action head is comfortably
+  below the 4.5 B cap.
 
 ### 3. Visual Locator Head
 
@@ -340,6 +419,7 @@ The script prefers a zip URL from FedLedger if one is present in the task payloa
 | Approach | Recommended VRAM |
 |----------|-----------------|
 | Basic CNN behavioral cloning | 8 – 16 GB |
+| Frozen Qwen2.5-VL-3B embedding pass | 16 – 24 GB |
 | Frozen CLIP/SigLIP + action head | 16 – 24 GB |
 | LoRA VLA ≤ 3 B params | 16 – 24 GB |
 | LoRA VLA ≤ 4.5 B params | 24 – 48 GB |
@@ -376,6 +456,8 @@ data/
   README.md               ← dataset details and optional local zip instructions
 scripts/
   train_basic_vla.py      ← baseline CNN behavioral cloning trainer
+  train_frozen_qwen_vla.py ← frozen Qwen2.5-VL + action-head trainer
+  qwen_frozen_policy_adapter.py ← canonical exported adapter
   inspect_training_zip.py ← dataset inspection utility
 utils/
   flock_api.py
